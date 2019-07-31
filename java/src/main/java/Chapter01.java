@@ -86,6 +86,7 @@ public class Chapter01 {
         long now = System.currentTimeMillis() / 1000;
         String article = RedisKeyNameBuilder.composeArticleHashName(articleId);
         HashMap<String,String> articleData = new HashMap<String,String>();
+        articleData.put("id", article);
         articleData.put("title", title);
         articleData.put("link", link);
         articleData.put("user", user);
@@ -124,7 +125,6 @@ public class Chapter01 {
         List<Map<String,String>> articles = new ArrayList<Map<String,String>>();
         for (String id : ids){
             Map<String,String> articleData = conn.hgetAll(id);
-            articleData.put("id", id);
             articles.add(articleData);
         }
 
