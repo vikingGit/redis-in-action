@@ -8,9 +8,21 @@ public class Chapter01 {
     private static final int VOTE_SCORE = 432;
     private static final int ARTICLES_PER_PAGE = 25;
 
+    public static class RedisKeyNameBuilder{
+        public static final String scoreSortedSetName = "score:";
+        public static final String timeSortedSetName = "time:";
+        public static String composeVotedUserSetName(String articleId) {
+            return "voted:" + articleId;
+        }
+        public static String composeArticleHashName(String articleId) {
+            return "article:" + articleId;
+        }
+    }
+
     public static final void main(String[] args) {
         new Chapter01().run();
     }
+
 
     public void run() {
         Jedis conn = new Jedis("localhost");
@@ -18,19 +30,13 @@ public class Chapter01 {
 
         String articleId = postArticle(
             conn, "username", "A title", "http://www.google.com");
-        System.out.println("We posted a new article with id: " + articleId);
-        System.out.println("Its HASH looks like:");
-        Map<String,String> articleData = conn.hgetAll("article:" + articleId);
-        for (Map.Entry<String,String> entry : articleData.entrySet()){
-            System.out.println("  " + entry.getKey() + ": " + entry.getValue());
-        }
+        displayArticle(conn, articleId);
 
         System.out.println();
 
-        articleVote(conn, "other_user", "article:" + articleId);
-        String votes = conn.hget("article:" + articleId, "votes");
-        System.out.println("We voted for the article, it now has votes: " + votes);
-        assert Integer.parseInt(votes) > 1;
+        articleVote(conn, "other_user", RedisKeyNameBuilder.composeArticleHashName(articleId));
+        String votes = conn.hget(RedisKeyNameBuilder.composeArticleHashName(articleId), "votes");
+        displayVotes(votes);
 
         System.out.println("The currently highest-scoring articles are:");
         List<Map<String,String>> articles = getArticles(conn, 1);
@@ -39,49 +45,75 @@ public class Chapter01 {
 
         addGroups(conn, articleId, new String[]{"new-group"});
         System.out.println("We added the article to a new group, other articles include:");
+        //display article order by score based on group
         articles = getGroupArticles(conn, "new-group", 1);
         printArticles(articles);
         assert articles.size() >= 1;
     }
 
+    private void displayVotes(String votes) {
+        System.out.println("We voted for the article, it now has votes: " + votes);
+        assert Integer.parseInt(votes) > 1;
+    }
+
+    private void displayArticle(Jedis conn, String articleId) {
+        System.out.println("We posted a new article with id: " + articleId);
+        System.out.println("Its HASH looks like:");
+        Map<String,String> articleData = conn.hgetAll(RedisKeyNameBuilder.composeArticleHashName(articleId));
+        for (Map.Entry<String,String> entry : articleData.entrySet()){
+            System.out.println("  " + entry.getKey() + ": " + entry.getValue());
+        }
+    }
+
+    /**
+     * voted1/2/3:-->set:user1,user2..
+     * article1/2/3 --> hashmap: tiltle...link...
+     * score -->zset: time+vote_score(order score)   article1/2/3
+     * time -->zset: time(order score) article1/2/3
+     * @param conn
+     * @param user
+     * @param title
+     * @param link
+     * @return
+     */
     public String postArticle(Jedis conn, String user, String title, String link) {
         String articleId = String.valueOf(conn.incr("article:"));
 
-        String voted = "voted:" + articleId;
-        conn.sadd(voted, user);
+        String voted = RedisKeyNameBuilder.composeVotedUserSetName(articleId);
+        conn.sadd(voted, user);//voted+articleID(Set)->user1,user2
         conn.expire(voted, ONE_WEEK_IN_SECONDS);
 
         long now = System.currentTimeMillis() / 1000;
-        String article = "article:" + articleId;
+        String article = RedisKeyNameBuilder.composeArticleHashName(articleId);
         HashMap<String,String> articleData = new HashMap<String,String>();
         articleData.put("title", title);
         articleData.put("link", link);
         articleData.put("user", user);
         articleData.put("now", String.valueOf(now));
         articleData.put("votes", "1");
-        conn.hmset(article, articleData);
-        conn.zadd("score:", now + VOTE_SCORE, article);
-        conn.zadd("time:", now, article);
+        conn.hmset(article, articleData);//article+articleID(Hash)-> "title"-->"";"link"-->""...
+        conn.zadd(RedisKeyNameBuilder.scoreSortedSetName, now + VOTE_SCORE, article);//score:(zset)->
+        conn.zadd(RedisKeyNameBuilder.timeSortedSetName, now, article);//time:(zset)->now(score) article(member)
 
         return articleId;
     }
 
     public void articleVote(Jedis conn, String user, String article) {
         long cutoff = (System.currentTimeMillis() / 1000) - ONE_WEEK_IN_SECONDS;
-        if (conn.zscore("time:", article) < cutoff){
+        if (conn.zscore(RedisKeyNameBuilder.timeSortedSetName, article) < cutoff){
             return;
         }
 
         String articleId = article.substring(article.indexOf(':') + 1);
-        if (conn.sadd("voted:" + articleId, user) == 1) {
-            conn.zincrby("score:", VOTE_SCORE, article);
+        if (conn.sadd(RedisKeyNameBuilder.composeVotedUserSetName(articleId), user) == 1) {
+            conn.zincrby(RedisKeyNameBuilder.scoreSortedSetName, VOTE_SCORE, article);
             conn.hincrBy(article, "votes", 1);
         }
     }
 
 
     public List<Map<String,String>> getArticles(Jedis conn, int page) {
-        return getArticles(conn, page, "score:");
+        return getArticles(conn, page, RedisKeyNameBuilder.scoreSortedSetName);
     }
 
     public List<Map<String,String>> getArticles(Jedis conn, int page, String order) {
@@ -100,22 +132,25 @@ public class Chapter01 {
     }
 
     public void addGroups(Jedis conn, String articleId, String[] toAdd) {
-        String article = "article:" + articleId;
+        String article = RedisKeyNameBuilder.composeArticleHashName(articleId);
         for (String group : toAdd) {
             conn.sadd("group:" + group, article);
         }
     }
 
     public List<Map<String,String>> getGroupArticles(Jedis conn, String group, int page) {
-        return getGroupArticles(conn, group, page, "score:");
+        return getGroupArticles(conn, group, page, RedisKeyNameBuilder.scoreSortedSetName);
     }
 
-    public List<Map<String,String>> getGroupArticles(Jedis conn, String group, int page, String order) {
-        String key = order + group;
+    /**
+     * do sorting in group
+     */
+    public List<Map<String,String>> getGroupArticles(Jedis conn, String group, int page, String sortedScoreKey) {
+        String key = sortedScoreKey + group;
         if (!conn.exists(key)) {
             ZParams params = new ZParams().aggregate(ZParams.Aggregate.MAX);
-            conn.zinterstore(key, params, "group:" + group, order);
-            conn.expire(key, 60);
+            conn.zinterstore(key, params, "group:" + group, sortedScoreKey);//将group set和order zset做交集，把交集结果放到新的zset中（key）,并以最大的score作为新的zset的score
+            conn.expire(key, 60);//缓存结果60s
         }
         return getArticles(conn, page, key);
     }
